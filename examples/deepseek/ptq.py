@@ -62,7 +62,7 @@ from modelopt.torch.quantization.utils import (
     is_quantized_parallel_linear,
     is_quantized_row_parallel_linear,
 )
-from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
+from modelopt.torch.utils.dataset_utils import get_dataset_dataloader, get_supported_datasets
 from modelopt.torch.utils.distributed import ParallelState
 
 DS_V3_PATH = Path(__file__).resolve().parent / "DeepSeek-V3/inference"
@@ -278,19 +278,30 @@ def ptq(
     tokenizer,
     quant_cfg: str,
     batch_size: int,
-    calib_size: int,
+    calib_size: int | list[int],
     mla_quant: str | None = None,
+    dataset_name: list[str] | None = None,
 ):
     """Runs Deepseek model PTQ and returns the quantized model."""
 
     # quantize the model
     ## create dataset
+    if dataset_name is None:
+        dataset_name = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+    if isinstance(calib_size, int):
+        num_samples = [calib_size] * len(dataset_name)
+    else:
+        num_samples = calib_size
+    assert len(dataset_name) == len(num_samples), (
+        "dataset_name and num_samples (calib_size) must have the same length."
+    )
+
     device = next(model.parameters()).device
     calib_dataset = get_dataset_dataloader(
-        dataset_name=["cnn_dailymail", "nemotron-post-training-dataset-v2"],
+        dataset_name=dataset_name,
         tokenizer=tokenizer,
         batch_size=batch_size,
-        num_samples=[calib_size, calib_size],
+        num_samples=num_samples,
         device=device,
     )
 
@@ -423,7 +434,25 @@ if __name__ == "__main__":
         "--output_path", type=str, required=True, help="target quantization config."
     )
     parser.add_argument("--batch_size", type=int, default=8, help="batch size for quantization.")
-    parser.add_argument("--calib_size", type=int, default=512, help="samples for calibration.")
+    parser.add_argument(
+        "--calib_size",
+        type=str,
+        default="512",
+        help=(
+            "Samples for calibration. Single int or comma-separated per dataset (e.g. 512 or 256,256)."
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help=(
+            "Calibration dataset: comma-separated names or paths. "
+            "E.g. cnn_dailymail or /path/to/calib.jsonl or cnn_dailymail,/path/to/other.jsonl. "
+            f"Names can be any of {get_supported_datasets()}. "
+            "If not set, uses cnn_dailymail,nemotron-post-training-dataset-v2."
+        ),
+    )
     parser.add_argument("--disable_fp8_kvcache", action="store_true", help="disable fp8 kvcache.")
     parser.add_argument("--disable_wo_quant", action="store_true", help="disable MLA wo quant.")
     parser.add_argument("--trust_remote_code", action="store_true", help="trust remote code.")
@@ -435,9 +464,33 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Parse --dataset and --calib_size into lists
+    if args.dataset is None:
+        dataset_list = None
+    else:
+        dataset_list = [s.strip() for s in args.dataset.split(",") if s.strip()]
+    calib_size_str = [s.strip() for s in args.calib_size.split(",") if s.strip()]
+    calib_size_list = [int(n) for n in calib_size_str]
+    if len(calib_size_list) == 1 and dataset_list is not None:
+        calib_size_list = calib_size_list * len(dataset_list)
+    elif dataset_list is not None and len(calib_size_list) != len(dataset_list):
+        parser.error(
+            f"--dataset has {len(dataset_list)} item(s) but --calib_size has {len(calib_size_list)}. "
+            "Use one calib_size (applied to all) or one per dataset."
+        )
+
     model = load_deepseek_model(args.config, args.model_path, args.batch_size)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.quant_cfg, args.batch_size, args.calib_size, args.mla_quant)
+    model = ptq(
+        model,
+        tokenizer,
+        args.quant_cfg,
+        args.batch_size,
+        calib_size_list if dataset_list is not None else calib_size_list[0],
+        args.mla_quant,
+        dataset_name=dataset_list,
+    )
     save_amax_and_quant_config(model, args.output_path, not args.disable_fp8_kvcache)

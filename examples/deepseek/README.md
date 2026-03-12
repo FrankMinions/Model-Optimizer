@@ -73,3 +73,5 @@ We provide a one-step-script which will:
 ```bash
 ./quantize_fp8_to_nvfp4.sh --amax_path $FP4_QUANT_PATH --fp4_output_path $HF_FP4_PATH --fp8_hf_path $HF_FP8_CKPT --world_size 8
 ```
+
+
